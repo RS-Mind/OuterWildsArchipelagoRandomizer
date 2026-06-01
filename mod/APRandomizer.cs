@@ -3,13 +3,11 @@ using Archipelago.MultiClient.Net.Enums;
 using Archipelago.MultiClient.Net.Helpers;
 using Archipelago.MultiClient.Net.MessageLog.Messages;
 using ArchipelagoRandomizer.InGameTracker;
-using ArchipelagoRandomizer.ItemImpls.FCProgression;
 using HarmonyLib;
 using Newtonsoft.Json;
 using OWML.Common;
 using OWML.ModHelper;
 using System;
-using System.Collections;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
@@ -55,8 +53,6 @@ public class APRandomizer : ModBehaviour
         SlotData.ContainsKey("dlc_only") && (long)SlotData["dlc_only"] > 0;
     public static bool SlotEnabledSplitTranslator() =>
         SlotData.ContainsKey("split_translator") && (long)SlotData["split_translator"] == 1;
-    public static bool SlotEnabledMod(string modOption) =>
-        SlotData.ContainsKey(modOption) && (long)SlotData[modOption] > 0;
 
     public static IModConsole OWMLModConsole { get => Instance.ModHelper.Console; }
     public static ArchConsoleManager InGameAPConsole;
@@ -67,8 +63,6 @@ public class APRandomizer : ModBehaviour
     public static bool IsVanillaSystemLoaded() =>
         LoadManager.GetCurrentScene() == OWScene.SolarSystem &&
         (NewHorizonsAPI == null || NewHorizonsAPI.GetCurrentStarSystem() == "SolarSystem");
-
-    public static bool NewHorizonsWarpingToVanillaSystem = false;
 
     /// <summary>
     /// Runs whenever a new session is created
@@ -84,13 +78,21 @@ public class APRandomizer : ModBehaviour
     public static bool AutoNomaiText = false;
     public static bool ColorNomaiText = true;
     public static bool InstantTranslator = false;
+
     public static bool HasSeenSettingsText = false;
+    public static bool DisableConsole = false;
+    public static bool DisableInGameLocationSending = false;
+    private static bool DisableInGameItemReceiving = false;
+    public static bool DisableInGameItemApplying = false;
+    private static bool DisableInGameSaveFileWrites = false;
 
     // Throttle save file writes to once per second to avoid IOExceptions for conflicting write attempts
     private static Task pendingSaveFileWrite = null;
     private static DateTimeOffset lastWriteTime = DateTimeOffset.UtcNow;
     public static void WriteToSaveFile()
     {
+        if (DisableInGameSaveFileWrites && LoadManager.GetCurrentScene() == OWScene.SolarSystem) return;
+
         if (pendingSaveFileWrite != null) return;
 
         if (lastWriteTime < DateTimeOffset.UtcNow.AddSeconds(-1))
@@ -128,12 +130,14 @@ public class APRandomizer : ModBehaviour
             OWMLModConsole.WriteLine($"Profile {profileName} read by the game. Checking for a corresponding AP APRandomizer save file.");
 
             var fileName = $"SaveData/{profileName}.json";
+            if (SaveFileName == fileName && DisableInGameSaveFileWrites)
+            {
+                OWMLModConsole.WriteLine($"skipping reload of {profileName} save file because the '[DEBUG] Don't Write To Save File In-Game' is in effect, and we don't want to throw away the pending writes");
+                return;
+            }
+
             SaveFileName = fileName;
-            // OWML's dubious "fixBackslashes" behavior can break our save data by turning e.g. "\"" into "/"" before actual parsing happens,
-            // turning correct JSON into incorrect JSON. This broke an actual AP save with quotes in an item name.
-            // idiot (the user) confirmed that if the file we're loading doesn't contain any filepaths,
-            // then fixBackslashes is definitely unwanted behavior and we should simply pass false for it.
-            SaveData = ModHelper.Storage.Load<APRandomizerSaveData>(SaveFileName, fixBackslashes: false);
+            SaveData = ModHelper.Storage.Load<APRandomizerSaveData>(SaveFileName);
             if (SaveData == null)
             {
                 OWMLModConsole.WriteLine($"No save file found for this profile.");
@@ -167,7 +171,7 @@ public class APRandomizer : ModBehaviour
         {
             APSession.Items.ItemReceived -= APSession_ItemReceived;
             APSession.MessageLog.OnMessageReceived -= APSession_OnMessageReceived;
-            OnSessionClosed?.Invoke(APSession, true);
+            OnSessionClosed(APSession, true);
         }
         APSession = ArchipelagoSessionFactory.CreateSession(cdata.hostname, (int)cdata.port);
         LoginResult result = APSession.TryConnectAndLogin("Outer Wilds", cdata.slotName, ItemsHandlingFlags.AllItems, password: cdata.password, requestSlotData: true);
@@ -238,17 +242,14 @@ public class APRandomizer : ModBehaviour
         {
             var apworld_version = (string)SlotData["apworld_version"];
             // We don't take this from manifest.json because here we don't want the "-rc" suffix for Relase Candidate versions.
-            var mod_version = "1.0.0";
+            var mod_version = "0.3.14";
             if (apworld_version != mod_version)
                 ArchConsoleManager.WakeupConsoleMessages.Add($"<color=red>Warning</color>: This Archipelago multiworld was generated with .apworld version <color=red>{apworld_version}</color>, " +
                     $"but you're playing version <color=red>{mod_version}</color> of the mod. This may lead to game-breaking bugs.");
         }
 
         if (SlotData.ContainsKey("death_link"))
-        {
-            DeathLinkManager.DisableDeathLinkIfActive(); // prevent "zombie" DLs being sent from slots we're no longer playing
             DeathLinkManager.ApplySlotDataSetting((long)SlotData["death_link"]);
-        }
 
         if (SlotData.ContainsKey("goal"))
             Victory.SetGoal((long)SlotData["goal"]);
@@ -303,7 +304,7 @@ public class APRandomizer : ModBehaviour
             APSession.Locations.CompleteLocationChecks(locationIdsMissedByServer.ToArray());
         }
 
-        OnSessionOpened?.Invoke(APSession);
+        OnSessionOpened(APSession);
 
         successCallback();
     }
@@ -356,6 +357,8 @@ public class APRandomizer : ModBehaviour
     {
         try
         {
+            if (DisableInGameItemReceiving && LoadManager.GetCurrentScene() == OWScene.SolarSystem) return;
+
             while (receivedItemsHelper.PeekItem() != null)
             {
                 var itemId = receivedItemsHelper.PeekItem().ItemId;
@@ -451,9 +454,7 @@ public class APRandomizer : ModBehaviour
 
         // Set up the console first so it can be safely used even in the various Setup() methods
         Assets = ModHelper.Assets.LoadBundle("Assets/archrandoassets");
-        // TODO: combine these two bundles if I ever do get around to learning asset bundle editing,
-        // or else take advantage of the separation by not loading this one when the DLC is unrandomized
-        TotemCodes.CodeAssets = ModHelper.Assets.LoadBundle("Assets/strangercodeassets");
+        TotemCodes.CodeAssets = ModHelper.Assets.LoadBundle("Assets/strangercodeassets"); // [!] This is a temporary assetbundle because I lack the ability to edit the main assetbundle
         InGameAPConsole = gameObject.AddComponent<ArchConsoleManager>();
 
         Tracker = gameObject.AddComponent<TrackerManager>();
@@ -476,8 +477,6 @@ public class APRandomizer : ModBehaviour
             Hints.OnCompleteSceneLoad();
             // Hearth's Neighbor 2: Magistarium custom item impls
             MemoryCubeInterface.OnCompleteSceneLoad();
-            // Forgotten Castaways custom item impls
-            ExpandedDictionary.OnCompleteSceneLoad();
         };
 
         // update the Nomai text setting before any can be created
@@ -495,61 +494,31 @@ public class APRandomizer : ModBehaviour
 
         Application.quitting += () => OnSessionClosed(APSession, false);
 
-        StartCoroutine(OverwriteNHInitialSpawn());
+        StartCoroutine(DisableNHSpawn());
 
-        if (NewHorizonsAPI != null)
-        {
-            NewHorizonsAPI.GetChangeStarSystemEvent().AddListener(system =>
+        var newHorizonsAPI = ModHelper.Interaction.TryGetModApi<INewHorizons>("xen.NewHorizons");
+        if (newHorizonsAPI != null)
+            newHorizonsAPI.GetStarSystemLoadedEvent().AddListener(system =>
             {
-                APRandomizer.OWMLModConsole.WriteLine($"NewHorizons API ChangeStarSystemEvent system = {system}");
-                Spawn.OnChangeStarSystemEvent(system);
-            });
-            NewHorizonsAPI.GetStarSystemLoadedEvent().AddListener(system =>
-            {
-                APRandomizer.OWMLModConsole.WriteLine($"NewHorizons API StarSystemLoadedEvent system = {system}");
+                // Hearth's Neighbor 2: Magistarium custom item impls
                 if (system == "Jam3")
                 {
-                    // Hearth's Neighbor 2: Magistarium custom item impls
                     MagistariumAccessCodes.OnJam3StarSystemLoadedEvent();
                 }
-                // Forgotten Castaways custom item impls
-                if (system == "DeepBramble")
-                {
-                    ThermalInsulation.OnDeepBrambleLoadEvent();
-                    TamingTechniques.OnDeepBrambleLoadEvent();
-                    RandomizeFollyLevers.OnDeepBrambleLoadEvent();
-                    ExpandedDictionary.OnDeepBrambleLoadEvent();
-                }
             });
-            // Adds a prerequisite to warping out of the Deep Bramble, for the Deep Bramble Spawn.
-            DeepBrambleCoordinates.ChangeExitWarp();
-        }
     }
-
-    // There's an important distinction here between your *initial* spawn at the start of a New/Resume (Random) Expedition,
-    // and the *current* spawn point for any given loop which NewHorizons typically changes when you warp between systems.
-    // Randomizers obviously need total control over the initial spawn, so NH story mods which change it need to be overwritten.
-    // But changing the current spawn on warp is a desirable time-saving feature with no impact on logic.
-    // So that's why we're doing this overwrite only once on mod Start().
-    IEnumerator OverwriteNHInitialSpawn()
+    System.Collections.IEnumerator DisableNHSpawn()
     {
         yield return new WaitForEndOfFrame();
 
-        if (NewHorizonsAPI is null)
+        var newHorizonsAPI = ModHelper.Interaction.TryGetModApi<INewHorizons>("xen.NewHorizons");
+        if (newHorizonsAPI is null)
             yield break;
 
         // There's no way to ask what the default system currently is, so if NH is running at all
         // then we have to assume it needs overriding.
-        if (Spawn.spawnChoice == Spawn.SpawnChoice.DeepBramble)
-        {
-            OWMLModConsole.WriteLine($"OverwriteNHInitialSpawn() calling SetDefaultSystem(\"DeepBramble\")");
-            NewHorizonsAPI.SetDefaultSystem("DeepBramble");
-        }
-        else
-        { 
-            OWMLModConsole.WriteLine($"OverwriteNHInitialSpawn() calling SetDefaultSystem(\"SolarSystem\")");
-            NewHorizonsAPI.SetDefaultSystem("SolarSystem");
-        }
+        OWMLModConsole.WriteLine($"DisableNHSpawn() calling SetDefaultSystem(\"SolarSystem\")");
+        newHorizonsAPI?.SetDefaultSystem("SolarSystem");
     }
 
     public override void SetupTitleMenu(ITitleMenuManager titleManager) => MainMenu.SetupTitleMenu(titleManager);
@@ -592,9 +561,14 @@ public class APRandomizer : ModBehaviour
         InstantTranslator = config.GetSettingsValue<bool>("Instant Translator");
         NomaiTextQoL.NomaiTextQoL.TranslateTime = InstantTranslator ? 0f : 0.2f;
 
+        DisableConsole = config.GetSettingsValue<bool>("[DEBUG] Disable In-Game Console");
+        DisableInGameLocationSending = config.GetSettingsValue<bool>("[DEBUG] Don't Send Locations In-Game");
+        DisableInGameItemReceiving = config.GetSettingsValue<bool>("[DEBUG] Don't Receive Items In-Game");
+        DisableInGameItemApplying = config.GetSettingsValue<bool>("[DEBUG] Don't Apply Received Items In-Game");
+        DisableInGameSaveFileWrites = config.GetSettingsValue<bool>("[DEBUG] Don't Write To Save File In-Game");
+
         InGameAPConsole?.ModSettingsChanged(config);
         DeathLinkManager.ApplyOverrideSetting();
-        DeathLinkManager.SetupRouletteValues(config);
         SuitResources.ModSettingsChanged(config);
         GhostMatterPlacement.ModSettingsChanged(config);
         TotemCodes.ModSettingsChanged(config);

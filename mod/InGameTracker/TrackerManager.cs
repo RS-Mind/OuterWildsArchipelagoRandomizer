@@ -1,9 +1,15 @@
 ﻿using Archipelago.MultiClient.Net;
 using Archipelago.MultiClient.Net.Models;
+using Newtonsoft.Json;
+using Newtonsoft.Json.Linq;
+using Steamworks;
 using System;
+using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
+using System.Linq;
+using System.Text.RegularExpressions;
 using UnityEngine;
-using Archipelago.MultiClient.Net.Enums;
 
 namespace ArchipelagoRandomizer.InGameTracker;
 
@@ -98,8 +104,7 @@ public class TrackerManager : MonoBehaviour
             suitApi.AddMode(suitInventoryMode, () => true, () => "AP Inventory");
             suitApi.ItemListMake(itemList =>
             {
-                Coordinates.EnsureShipLogCoordsSpriteIsUpToDate(); // in case the player selects the Mission or EotU Coords entries (in AP modes)
-                Coordinates.EnsureShipLogPTMEntrySpriteEdited(); // in case the player selects the PTM entries (vanilla or AP)
+                Coordinates.EnsureShipLogCoordsSpriteCreated();
                 TotemCodes.EnsureCodeSpriteCreated();
                 SuitLogItemListWrapper wrapper = new SuitLogItemListWrapper(suitApi, itemList);
                 wrapper.DescriptionFieldOpen();
@@ -116,8 +121,7 @@ public class TrackerManager : MonoBehaviour
             });
             suitApi.ItemListMake(itemList =>
             {
-                Coordinates.EnsureShipLogCoordsSpriteIsUpToDate(); // in case the player selects the Mission or EotU Coords entries (in AP modes)
-                Coordinates.EnsureShipLogPTMEntrySpriteEdited(); // in case the player selects the PTM entries (vanilla or AP)
+                Coordinates.EnsureShipLogCoordsSpriteCreated();
                 TotemCodes.EnsureCodeSpriteCreated();
                 SuitLogItemListWrapper wrapper = new SuitLogItemListWrapper(suitApi, itemList);
                 wrapper.DescriptionFieldOpen();
@@ -159,14 +163,13 @@ public class TrackerManager : MonoBehaviour
             playerName = session.Players.GetPlayerName(hint.ReceivingPlayer) + "'s";
         }
         string itemColor;
-        if (hint.ItemFlags.HasFlag(ItemFlags.Advancement))
-            itemColor = "#B883B4";
-        else if (hint.ItemFlags.HasFlag(ItemFlags.NeverExclude))
-            itemColor = "#524798";
-        else if (hint.ItemFlags.HasFlag(ItemFlags.Trap))
-            itemColor = "#DA6F62";
-        else
-            itemColor = "#01CACA";
+        switch (hint.ItemFlags)
+        {
+            case Archipelago.MultiClient.Net.Enums.ItemFlags.Advancement: itemColor = "#B883B4"; break;
+            case Archipelago.MultiClient.Net.Enums.ItemFlags.NeverExclude: itemColor = "#524798"; break;
+            case Archipelago.MultiClient.Net.Enums.ItemFlags.Trap: itemColor = "#DA6F62"; break;
+            default: itemColor = "#01CACA"; break;
+        }
         string receivingGame = session.Players.GetPlayerInfo(hint.ReceivingPlayer).Game;
         string itemName = session.Items.GetItemName(hint.ItemId, receivingGame); // the game name argument is required to work with non-OW items
         string hintDescription = $"It looks like {playerName} <color={itemColor}>{itemName}</color> can be found here";
